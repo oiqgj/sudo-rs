@@ -10,8 +10,8 @@ use crate::pam::PamContext;
 use crate::sudo::env::environment;
 use crate::sudo::pam::{InitPamArgs, attempt_authenticate, init_pam, pre_exec};
 use crate::sudoers::{
-    AuthenticatingUser, Authentication, AuthenticationScope, Authorization, Judgement, Logging,
-    Sudoers,
+    AuthenticatingUser, Authentication, AuthenticationScope, Authorization, Judgement,
+    JudgementAuthorization, Logging, Restrictions, Sudoers, Witness,
 };
 use crate::system::term::{current_tty_name, lock_tty};
 use crate::system::timestamp::{RecordScope, SessionRecordFile, TouchResult};
@@ -58,8 +58,8 @@ fn read_sudoers() -> Result<Sudoers, Error> {
     Ok(sudoers)
 }
 
-fn judge(mut policy: Sudoers, context: &Context) -> Result<Judgement, Error> {
-    Ok(policy.check(
+fn judge(mut policy: Sudoers, context: &Context) -> Judgement {
+    policy.check(
         &*context.current_user,
         &context.hostname,
         crate::sudoers::Request {
@@ -68,7 +68,7 @@ fn judge(mut policy: Sudoers, context: &Context) -> Result<Judgement, Error> {
             command: &context.command.command,
             arguments: &context.command.arguments,
         },
-    ))
+    )
 }
 
 pub fn run(mut cmd_opts: SudoRunOptions) -> Result<(), Error> {
@@ -78,13 +78,40 @@ pub fn run(mut cmd_opts: SudoRunOptions) -> Result<(), Error> {
 
     let context = Context::from_run_opts(cmd_opts, &mut policy)?;
 
-    let policy = judge(policy, &context)?;
+    let policy = judge(policy, &context);
 
-    let Authorization::Allowed(auth, controls) = policy.authorization() else {
-        return Err(Error::Authorization(context.current_user.name.to_string()));
-    };
+    let (witness, auth, controls) = policy
+        .authorization()
+        .ok_or(Error::Authorization(context.current_user.name.to_string()))?;
 
-    let mut pam_context = auth_and_update_record_file(&context, auth)?;
+    execute_authorized_command(context, auth, controls, user_requested_env_vars, witness)
+}
+
+pub fn run_validate(cmd_opts: SudoValidateOptions) -> Result<(), Error> {
+    let mut policy = read_sudoers()?;
+
+    let context = Context::from_validate_opts(cmd_opts)?;
+
+    match policy.check_validate_permission(&*context.current_user, &context.hostname) {
+        Authorization::Forbidden => {
+            return Err(Error::Authorization(context.current_user.name.to_string()));
+        }
+        Authorization::Allowed(witness, auth, ()) => {
+            auth_and_update_record_file(&context, auth, &witness)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn execute_authorized_command(
+    context: Context,
+    auth: Authentication,
+    controls: Restrictions,
+    user_requested_env_vars: Vec<(String, String)>,
+    witness: Witness<JudgementAuthorization>,
+) -> Result<(), Error> {
+    let mut pam_context = auth_and_update_record_file(&context, auth, &witness)?;
 
     // build environment
     let additional_env = pre_exec(&mut pam_context, &context.target_user.name)?;
@@ -127,24 +154,7 @@ pub fn run(mut cmd_opts: SudoRunOptions) -> Result<(), Error> {
     match command_exit_reason?.exit_process()? {}
 }
 
-pub fn run_validate(cmd_opts: SudoValidateOptions) -> Result<(), Error> {
-    let mut policy = read_sudoers()?;
-
-    let context = Context::from_validate_opts(cmd_opts)?;
-
-    match policy.check_validate_permission(&*context.current_user, &context.hostname) {
-        Authorization::Forbidden => {
-            return Err(Error::Authorization(context.current_user.name.to_string()));
-        }
-        Authorization::Allowed(auth, ()) => {
-            auth_and_update_record_file(&context, auth)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn auth_and_update_record_file(
+fn auth_and_update_record_file<Kind>(
     context: &Context,
     Authentication {
         must_authenticate,
@@ -156,6 +166,7 @@ fn auth_and_update_record_file(
         noninteractive_auth,
         scope,
     }: Authentication,
+    _witness: &Witness<Kind>,
 ) -> Result<PamContext, Error> {
     let auth_user = match credential {
         AuthenticatingUser::InvokingUser => {

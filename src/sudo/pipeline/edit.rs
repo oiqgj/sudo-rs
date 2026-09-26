@@ -1,7 +1,7 @@
 use super::super::cli::SudoEditOptions;
 use crate::common::{Context, DisplayOsStr, Error};
 use crate::log::{user_error, user_info};
-use crate::sudoers::Authorization;
+use crate::sudoers::{Authentication, Judgement, JudgementAuthorization, Restrictions, Witness};
 use crate::system::audit;
 
 pub fn run_edit(edit_opts: SudoEditOptions) -> Result<(), Error> {
@@ -9,13 +9,23 @@ pub fn run_edit(edit_opts: SudoEditOptions) -> Result<(), Error> {
 
     let context = Context::from_edit_opts(edit_opts)?;
 
-    let policy = super::judge(policy, &context)?;
+    let policy = super::judge(policy, &context);
 
-    let Authorization::Allowed(auth, controls) = policy.authorization() else {
-        return Err(Error::Authorization(context.current_user.name.to_string()));
-    };
+    let (witness, auth, controls) = policy
+        .authorization()
+        .ok_or(Error::Authorization(context.current_user.name.to_string()))?;
 
-    let mut pam_context = super::auth_and_update_record_file(&context, auth)?;
+    execute_authorized_edit(context, &policy, auth, controls, witness)
+}
+
+fn execute_authorized_edit(
+    context: Context,
+    policy: &Judgement,
+    auth: Authentication,
+    controls: Restrictions,
+    witness: Witness<JudgementAuthorization>,
+) -> Result<(), Error> {
+    let mut pam_context = super::auth_and_update_record_file(&context, auth, &witness)?;
 
     let mut opened_files = Vec::with_capacity(context.files_to_edit.len());
     for (path, arg) in context.files_to_edit.iter().zip(&context.command.arguments) {

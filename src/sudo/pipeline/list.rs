@@ -8,7 +8,7 @@ use std::{
 use crate::{
     common::{Context, DisplayOsStr, Error},
     sudo::cli::SudoListOptions,
-    sudoers::{Authorization, ListRequest, Request, Sudoers},
+    sudoers::{Authorization, JudgementAuthorization, ListRequest, Request, Sudoers, Witness},
     system::User,
 };
 
@@ -84,8 +84,8 @@ fn auth_invoking_user(
         target_group: &context.target_group,
     };
     match sudoers.check_list_permission(&*context.current_user, &context.hostname, list_request) {
-        Authorization::Allowed(auth, ()) => {
-            auth_and_update_record_file(context, auth)?;
+        Authorization::Allowed(witness, auth, ()) => {
+            auth_and_update_record_file(context, auth, &witness)?;
             Ok(ControlFlow::Continue(()))
         }
 
@@ -123,30 +123,37 @@ fn check_sudo_command_perms(
 
     let judgement = sudoers.check(user, &context.hostname, request);
 
-    if let Authorization::Forbidden = judgement.authorization() {
-        return Err(Error::Silent);
-    } else {
-        if !context.command.resolved {
-            return Err(Error::CommandNotFound(context.command.command));
-        }
-        let command_is_relative_path = original_command.as_encoded_bytes().contains(&b'/')
-            && !Path::new(&original_command).is_absolute();
-        let command = if command_is_relative_path {
-            original_command
-        } else {
-            let resolved_command = &context.command.command;
-            resolved_command.as_os_str()
-        };
+    let (witness, ..) = judgement.authorization().ok_or(Error::Silent)?;
 
-        if context.command.arguments.is_empty() {
-            println_ignore_io_error!("{}", DisplayOsStr(command));
-        } else {
-            println_ignore_io_error!(
-                "{} {}",
-                DisplayOsStr(command),
-                DisplayOsStr(&context.command.arguments.join(OsStr::new(" "))),
-            );
-        }
+    print_resolved_command(original_command, context, witness)
+}
+
+fn print_resolved_command(
+    original_command: &OsStr,
+    context: Context,
+    _witness: Witness<JudgementAuthorization>,
+) -> Result<(), Error> {
+    if !context.command.resolved {
+        return Err(Error::CommandNotFound(context.command.command));
+    }
+
+    let command_is_relative_path = original_command.as_encoded_bytes().contains(&b'/')
+        && !Path::new(&original_command).is_absolute();
+    let command = if command_is_relative_path {
+        original_command
+    } else {
+        let resolved_command = &context.command.command;
+        resolved_command.as_os_str()
+    };
+
+    if context.command.arguments.is_empty() {
+        println_ignore_io_error!("{}", DisplayOsStr(command));
+    } else {
+        println_ignore_io_error!(
+            "{} {}",
+            DisplayOsStr(command),
+            DisplayOsStr(&context.command.arguments.join(OsStr::new(" "))),
+        );
     }
 
     Ok(())

@@ -4,7 +4,7 @@
 //! The trait definitions can be part of some global crate in the future, if we support more
 //! than just the sudoers file.
 
-use super::{Judgement, Sudoers};
+use super::{Judgement, JudgementAuthorization, Sudoers, Witness};
 use crate::common::{
     HARDENED_ENUM_VALUE_0, HARDENED_ENUM_VALUE_1, HARDENED_ENUM_VALUE_2, SudoPath,
 };
@@ -13,15 +13,25 @@ use crate::exec::Umask;
 use crate::sudoers::ast::{EnvironmentControl, ExecControl, Tag};
 use crate::system::{Hostname, User};
 use std::collections::HashSet;
+use std::marker::PhantomData;
 use std::time::Duration;
 use std::{ffi::OsString, path::PathBuf};
 
 #[must_use]
 #[cfg_attr(test, derive(Debug, PartialEq))]
 #[repr(u32)]
-pub enum Authorization<T = ()> {
-    Allowed(Authentication, T) = HARDENED_ENUM_VALUE_0,
+pub enum Authorization<Kind, T = ()> {
+    Allowed(Witness<Kind>, Authentication, T) = HARDENED_ENUM_VALUE_0,
     Forbidden = HARDENED_ENUM_VALUE_1,
+}
+
+impl<Kind, T> Authorization<Kind, T> {
+    pub fn ok_or<E>(self, err: E) -> Result<(Witness<Kind>, Authentication, T), E> {
+        match self {
+            Authorization::Allowed(witness, auth, t) => Ok((witness, auth, t)),
+            Authorization::Forbidden => Err(err),
+        }
+    }
 }
 
 #[cfg_attr(test, derive(Debug, PartialEq))]
@@ -115,7 +125,7 @@ pub enum AuthenticationScope {
 }
 
 impl Judgement {
-    pub fn authorization(&self) -> Authorization<Restrictions<'_>> {
+    pub fn authorization(&self) -> Authorization<JudgementAuthorization, Restrictions<'_>> {
         // NOTE: we should add conditional compilation to the DSL; this avoids getting
         // an unused warning message
         #[cfg(not(feature = "apparmor"))]
@@ -123,6 +133,7 @@ impl Judgement {
 
         if let Some(tag) = &self.flags {
             Authorization::Allowed(
+                Witness::new(),
                 self.settings.to_auth(tag),
                 Restrictions {
                     use_pty: self.settings.use_pty(),
@@ -223,7 +234,7 @@ mod test {
         let mut judge: Judgement = Default::default();
         assert_eq!(judge.authorization(), Authorization::Forbidden);
         judge.mod_flag(|tag| tag.authenticate = Authenticate::Passwd);
-        let Authorization::Allowed(auth, restrictions) = judge.authorization() else {
+        let Authorization::Allowed(_, auth, restrictions) = judge.authorization() else {
             panic!();
         };
         assert_eq!(
@@ -242,7 +253,7 @@ mod test {
 
         let mut judge = judge.clone();
         judge.mod_flag(|tag| tag.authenticate = Authenticate::Nopasswd);
-        let Authorization::Allowed(auth, restrictions2) = judge.authorization() else {
+        let Authorization::Allowed(_, auth, restrictions2) = judge.authorization() else {
             panic!();
         };
         assert_eq!(
@@ -268,7 +279,7 @@ mod test {
             ..Default::default()
         };
         fn chdir(judge: &mut Judgement) -> DirChange {
-            let Authorization::Allowed(_, ctl) = judge.authorization() else {
+            let Authorization::Allowed(_, _, ctl) = judge.authorization() else {
                 panic!()
             };
             ctl.chdir

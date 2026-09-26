@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt;
 use std::io;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
 use crate::common::resolve::{is_valid_executable, resolve_path};
@@ -66,6 +67,26 @@ pub struct ListRequest<'a, User: UnixUser, Group: UnixGroup> {
     pub target_user: &'a User,
     pub target_group: &'a Group,
 }
+
+#[cfg_attr(test, derive(Debug, PartialEq))]
+pub struct Witness<Kind> {
+    _kind: PhantomData<Kind>,
+}
+
+impl<Kind> Witness<Kind> {
+    fn new() -> Self {
+        Self { _kind: PhantomData }
+    }
+}
+
+#[cfg_attr(test, derive(Debug, PartialEq))]
+pub struct CheckListPermission;
+
+#[cfg_attr(test, derive(Debug, PartialEq))]
+pub struct CheckValidatePermission;
+
+#[cfg_attr(test, derive(Debug, PartialEq))]
+pub struct JudgementAuthorization;
 
 #[derive(Default)]
 #[cfg_attr(test, derive(Clone))]
@@ -192,7 +213,7 @@ impl Sudoers {
         invoking_user: &User,
         hostname: &system::Hostname,
         request: ListRequest<User, Group>,
-    ) -> Authorization {
+    ) -> Authorization<CheckListPermission> {
         let skip_passwd;
         let mut flags = if request.inspected_user != invoking_user {
             skip_passwd = invoking_user.is_root();
@@ -225,7 +246,7 @@ impl Sudoers {
                 tag.authenticate = Authenticate::Nopasswd;
             }
 
-            Authorization::Allowed(self.settings.to_auth(tag), ())
+            Authorization::Allowed(Witness::new(), self.settings.to_auth(tag), ())
         } else {
             Authorization::Forbidden
         }
@@ -235,7 +256,7 @@ impl Sudoers {
         &mut self,
         invoking_user: &User,
         hostname: &system::Hostname,
-    ) -> Authorization {
+    ) -> Authorization<CheckValidatePermission> {
         self.specify_host_user_runas(hostname, invoking_user, None);
 
         // exception: if user is root, NOPASSWD is implied
@@ -252,7 +273,7 @@ impl Sudoers {
                 tag.authenticate = Authenticate::Nopasswd;
             }
 
-            Authorization::Allowed(self.settings.to_auth(tag), ())
+            Authorization::Allowed(Witness::new(), self.settings.to_auth(tag), ())
         } else {
             Authorization::Forbidden
         }
